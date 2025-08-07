@@ -1,4 +1,4 @@
-# POST http://localhost:3000/signin 
+# POST https://connectbackend.llp.trizenventures.com/signin 
 # Content-Type: application/json
 
 # {
@@ -6,4 +6,4 @@
 #     "password" : "Ku"
 # }
 
-GET http://localhost:3000/get-upload-url
+GET https://connectbackend.llp.trizenventures.com/get-upload-url
