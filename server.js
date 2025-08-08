@@ -27,7 +27,8 @@ server.use(express.json());
 server.use(cors({
   origin: [
     "http://localhost:5173",
-    "https://connectfrontend.llp.trizenventures.com"
+    "https://connectfrontend.llp.trizenventures.com",
+    "https://connect.trizenventures.com"
   ],
   credentials: true
 }))
