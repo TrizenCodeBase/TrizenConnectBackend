@@ -489,6 +489,302 @@ server.get("/blog/:id", async (req, res) => {
     }
 });
 
+// Profile Management Routes
+
+// Get user profile by username
+server.post("/get-profile", async (req, res) => {
+    try {
+        let { username } = req.body;
+
+        const user = await User.findOne({ "personal_info.username": username })
+            .select("-personal_info.password -personal_info.hashed_password -google_auth -updatedAt -blogs");
+
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        return res.status(200).json(user);
+    } catch (error) {
+        console.error("Get profile error:", error);
+        return res.status(500).json({ error: error.message || "Failed to fetch profile" });
+    }
+});
+
+// Update user profile (requires authentication)
+server.post("/update-profile", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { bio, social_links } = req.body;
+
+        // Validate bio length
+        if (bio && bio.length > 200) {
+            return res.status(400).json({ error: "Bio should not exceed 200 characters" });
+        }
+
+        // Update user profile
+        const updateData = {};
+        if (bio !== undefined) updateData["personal_info.bio"] = bio;
+        if (social_links) updateData.social_links = social_links;
+
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            { $set: updateData },
+            { new: true, runValidators: true }
+        ).select("-personal_info.password -personal_info.hashed_password -google_auth");
+
+        if (!updatedUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        return res.status(200).json({ 
+            message: "Profile updated successfully",
+            user: updatedUser
+        });
+    } catch (error) {
+        console.error("Update profile error:", error);
+        return res.status(500).json({ error: error.message || "Failed to update profile" });
+    }
+});
+
+// Change password (requires authentication)
+server.post("/change-password", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { currentPassword, newPassword } = req.body;
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ error: "Current password and new password are required" });
+        }
+
+        // Validate new password
+        if (!passwordRegex.test(newPassword)) {
+            return res.status(400).json({ 
+                error: "New password should be 6 to 20 characters long with a numeric, 1 lowercase and 1 uppercase letter" 
+            });
+        }
+
+        // Get user
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        // Check if user signed up with Google
+        if (user.google_auth) {
+            return res.status(400).json({ 
+                error: "Cannot change password for Google-authenticated accounts" 
+            });
+        }
+
+        // Verify current password
+        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.personal_info.hashed_password);
+        if (!isCurrentPasswordValid) {
+            return res.status(400).json({ error: "Current password is incorrect" });
+        }
+
+        // Hash new password
+        const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+        // Update password
+        await User.findByIdAndUpdate(userId, {
+            "personal_info.hashed_password": hashedNewPassword
+        });
+
+        return res.status(200).json({ message: "Password changed successfully" });
+    } catch (error) {
+        console.error("Change password error:", error);
+        return res.status(500).json({ error: error.message || "Failed to change password" });
+    }
+});
+
+// Get user's blogs (published and drafts) - requires authentication
+server.post("/user-written-blogs", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        let { page = 1, draft, deletedDocCount = 0 } = req.body;
+        
+        let maxLimit = 5;
+        let skipDocs = (page - 1) * maxLimit;
+        
+        if (deletedDocCount) {
+            skipDocs -= deletedDocCount;
+        }
+
+        const blogs = await Blog.find({ author: userId, draft: !!draft })
+            .skip(skipDocs)
+            .limit(maxLimit)
+            .sort({ publishedAt: -1 })
+            .select("title banner publishedAt blog_id activity des draft -_id");
+
+        return res.status(200).json({ blogs });
+    } catch (error) {
+        console.error("Get user blogs error:", error);
+        return res.status(500).json({ error: error.message || "Failed to fetch user blogs" });
+    }
+});
+
+// Get count of user's blogs - requires authentication
+server.post("/user-written-blogs-count", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        let { draft } = req.body;
+        
+        const count = await Blog.countDocuments({ author: userId, draft: !!draft });
+        
+        return res.status(200).json({ totalDocs: count });
+    } catch (error) {
+        console.error("Get user blogs count error:", error);
+        return res.status(500).json({ error: error.message || "Failed to fetch user blogs count" });
+    }
+});
+
+// Update profile image (requires authentication)
+server.post("/update-profile-img", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { url } = req.body;
+
+        if (!url) {
+            return res.status(400).json({ error: "Profile image URL is required" });
+        }
+
+        // Update user profile image
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            { "personal_info.profile_img": url },
+            { new: true }
+        ).select("personal_info.profile_img");
+
+        if (!updatedUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        return res.status(200).json({ 
+            message: "Profile image updated successfully",
+            profile_img: updatedUser.personal_info.profile_img
+        });
+    } catch (error) {
+        console.error("Update profile image error:", error);
+        return res.status(500).json({ error: error.message || "Failed to update profile image" });
+    }
+});
+
+// Delete blog (requires authentication)
+server.post("/delete-blog", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { blog_id } = req.body;
+
+        if (!blog_id) {
+            return res.status(400).json({ error: "Blog ID is required" });
+        }
+
+        // Find and verify ownership
+        const blog = await Blog.findOne({ blog_id, author: userId });
+        if (!blog) {
+            return res.status(404).json({ error: "Blog not found or unauthorized" });
+        }
+
+        // Delete the blog
+        await Blog.findByIdAndDelete(blog._id);
+
+        // Update user's blog count
+        await User.findByIdAndUpdate(userId, {
+            $pull: { blogs: blog._id },
+            $inc: { "account_info.total_posts": -1 }
+        });
+
+        return res.status(200).json({ message: "Blog deleted successfully" });
+    } catch (error) {
+        console.error("Delete blog error:", error);
+        return res.status(500).json({ error: error.message || "Failed to delete blog" });
+    }
+});
+
 // Health check endpoint
 server.get('/health', (req, res) => {
     res.status(200).json({ 
@@ -516,7 +812,14 @@ server.get('/', (req, res) => {
             'GET /trending-blogs',
             'POST /google-auth',
             'POST /signin',
-            'POST /signup'
+            'POST /signup',
+            'POST /get-profile',
+            'POST /update-profile',
+            'POST /update-profile-img',
+            'POST /change-password',
+            'POST /user-written-blogs',
+            'POST /user-written-blogs-count',
+            'POST /delete-blog'
         ]
     });
 });
