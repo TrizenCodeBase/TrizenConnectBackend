@@ -524,4 +524,5 @@ server.get('/', (req, res) => {
 server.listen(PORT,() => {
     console.log('Listening on port -> '+ PORT);
     console.log('Firebase configured:', !!serviceAccountKey?.project_id);
+    console.log('CORS configuration active - Build v2.0');
 })
