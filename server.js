@@ -4,6 +4,8 @@ import 'dotenv/config'
 import bcrypt from 'bcrypt';
 import User from './Schema/User.js';
 import Blog from './Schema/Blog.js';
+import Comment from './Schema/Comment.js';
+import Notification from './Schema/Notification.js';
 import { nanoid } from 'nanoid';
 import jwt from 'jsonwebtoken';
 import cors from 'cors';
@@ -479,7 +481,7 @@ server.get("/blog/:id", async (req, res) => {
     try {
         const { id } = req.params;
         const blog = await Blog.findOne({ blog_id: id, draft: false })
-            .populate("author", "personal_info.profile_img personal_info.username personal_info.fullname -_id");
+            .populate("author", "personal_info.profile_img personal_info.username personal_info.fullname");
         if (!blog) {
             return res.status(404).json({ error: "Blog not found" });
         }
@@ -785,6 +787,498 @@ server.post("/delete-blog", async (req, res) => {
     }
 });
 
+// Blog Interaction Routes
+
+// Like/Unlike blog (requires authentication)
+server.post("/like-blog", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { _id, isLikedByUser } = req.body;
+
+        console.log("Like blog request:", { _id, isLikedByUser, userId });
+
+        if (!_id) {
+            return res.status(400).json({ error: "Blog ID is required" });
+        }
+
+        let incrementVal = !isLikedByUser ? 1 : -1;
+
+        // Update blog like count
+        const blog = await Blog.findByIdAndUpdate(_id, {
+            $inc: { "activity.total_likes": incrementVal }
+        }, { new: true });
+
+        if (!blog) {
+            return res.status(404).json({ error: "Blog not found" });
+        }
+
+        if (!isLikedByUser) {
+            // Add like notification to author (if user is not liking their own blog)
+            if (blog.author.toString() !== userId) {
+                const notification = new Notification({
+                    type: "like",
+                    blog: _id,
+                    notification_for: blog.author,
+                    user: userId
+                });
+                await notification.save();
+            }
+        } else {
+            // Remove like notification
+            await Notification.findOneAndDelete({
+                type: "like",
+                blog: _id,
+                notification_for: blog.author,
+                user: userId
+            });
+        }
+
+        return res.status(200).json({ 
+            liked_by_user: !isLikedByUser,
+            total_likes: blog.activity.total_likes
+        });
+    } catch (error) {
+        console.error("Like blog error:", error);
+        return res.status(500).json({ error: error.message || "Failed to like blog" });
+    }
+});
+
+// Check if user liked a blog (requires authentication)
+server.post("/isliked-by-user", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { _id } = req.body;
+
+        if (!_id) {
+            return res.status(400).json({ error: "Blog ID is required" });
+        }
+
+        // Check if user has liked this blog (look for like notification)
+        const notification = await Notification.findOne({
+            type: "like",
+            blog: _id,
+            user: userId
+        });
+
+        return res.status(200).json({ result: !!notification });
+    } catch (error) {
+        console.error("Check like status error:", error);
+        return res.status(500).json({ error: error.message || "Failed to check like status" });
+    }
+});
+
+// Add comment to blog (requires authentication)
+server.post("/add-comment", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { _id, comment, blog_author, replying_to, notification_id } = req.body;
+
+        console.log("Add comment request data:", { _id, comment, blog_author, replying_to });
+
+        if (!_id) {
+            return res.status(400).json({ error: "Blog ID is required" });
+        }
+
+        if (!comment || !comment.trim()) {
+            return res.status(400).json({ error: "Comment content is required" });
+        }
+
+        if (comment.length > 500) {
+            return res.status(400).json({ error: "Comment should not exceed 500 characters" });
+        }
+
+        if (!blog_author) {
+            return res.status(400).json({ error: "Blog author is required" });
+        }
+
+        const commentObj = {
+            blog_id: _id,
+            blog_author,
+            comment,
+            commented_by: userId,
+            isReply: !!replying_to
+        };
+
+        if (replying_to) {
+            commentObj.parent = replying_to;
+        }
+
+        const newComment = new Comment(commentObj);
+        await newComment.save();
+
+        let incrementVal = 1;
+
+        if (replying_to) {
+            // Update parent comment's children count
+            await Comment.findByIdAndUpdate(replying_to, {
+                $push: { children: newComment._id }
+            });
+            incrementVal = 0; // Don't count replies in blog's total comment count
+        }
+
+        // Update blog comment count
+        await Blog.findByIdAndUpdate(_id, {
+            $push: { comments: newComment._id },
+            $inc: { 
+                "activity.total_comments": incrementVal,
+                "activity.total_parent_comments": replying_to ? 0 : 1
+            }
+        });
+
+        // Create notification for blog author (if not commenting on own blog)
+        if (blog_author !== userId) {
+            if (replying_to) {
+                // Delete existing reply notification if updating
+                if (notification_id) {
+                    await Notification.findByIdAndDelete(notification_id);
+                }
+
+                // Create reply notification
+                const notification = new Notification({
+                    type: "reply",
+                    blog: _id,
+                    notification_for: blog_author,
+                    user: userId,
+                    comment: newComment._id,
+                    replied_on_comment: replying_to,
+                    reply: newComment._id
+                });
+                await notification.save();
+            } else {
+                // Create comment notification
+                const notification = new Notification({
+                    type: "comment",
+                    blog: _id,
+                    notification_for: blog_author,
+                    user: userId,
+                    comment: newComment._id
+                });
+                await notification.save();
+            }
+        }
+
+        // Populate comment with user details for response
+        await newComment.populate("commented_by", "personal_info.profile_img personal_info.username personal_info.fullname");
+
+        return res.status(200).json(newComment);
+    } catch (error) {
+        console.error("Add comment error:", error);
+        return res.status(500).json({ error: error.message || "Failed to add comment" });
+    }
+});
+
+// Get blog comments
+server.post("/get-blog-comments", async (req, res) => {
+    try {
+        const { blog_id, skip = 0 } = req.body;
+
+        if (!blog_id) {
+            return res.status(400).json({ error: "Blog ID is required" });
+        }
+
+        let maxLimit = 5;
+
+        const comments = await Comment.find({ blog_id, isReply: false })
+            .populate("commented_by", "personal_info.profile_img personal_info.username personal_info.fullname")
+            .skip(skip)
+            .limit(maxLimit)
+            .sort({ commentedAt: -1 });
+
+        return res.status(200).json(comments);
+    } catch (error) {
+        console.error("Get comments error:", error);
+        return res.status(500).json({ error: error.message || "Failed to fetch comments" });
+    }
+});
+
+// Get comment replies
+server.post("/get-replies", async (req, res) => {
+    try {
+        const { _id, skip = 0 } = req.body;
+
+        if (!_id) {
+            return res.status(400).json({ error: "Comment ID is required" });
+        }
+
+        let maxLimit = 5;
+
+        const replies = await Comment.find({ parent: _id })
+            .populate("commented_by", "personal_info.profile_img personal_info.username personal_info.fullname")
+            .skip(skip)
+            .limit(maxLimit)
+            .sort({ commentedAt: -1 });
+
+        return res.status(200).json(replies);
+    } catch (error) {
+        console.error("Get replies error:", error);
+        return res.status(500).json({ error: error.message || "Failed to fetch replies" });
+    }
+});
+
+// Delete comment (requires authentication)
+server.post("/delete-comment", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { _id } = req.body;
+
+        if (!_id) {
+            return res.status(400).json({ error: "Comment ID is required" });
+        }
+
+        // Find comment and verify ownership or blog ownership
+        const comment = await Comment.findById(_id);
+        if (!comment) {
+            return res.status(404).json({ error: "Comment not found" });
+        }
+
+        // Check if user is comment owner or blog author
+        const blog = await Blog.findById(comment.blog_id);
+        if (comment.commented_by.toString() !== userId && blog.author.toString() !== userId) {
+            return res.status(403).json({ error: "Unauthorized to delete this comment" });
+        }
+
+        // Delete comment and all its replies
+        await Comment.findByIdAndDelete(_id);
+        await Comment.deleteMany({ parent: _id });
+
+        // Update blog comment counts
+        const parentCommentsCount = await Comment.countDocuments({ 
+            blog_id: comment.blog_id, 
+            isReply: false 
+        });
+        
+        const totalCommentsCount = await Comment.countDocuments({ 
+            blog_id: comment.blog_id 
+        });
+
+        await Blog.findByIdAndUpdate(comment.blog_id, {
+            $pull: { comments: _id },
+            $set: {
+                "activity.total_parent_comments": parentCommentsCount,
+                "activity.total_comments": totalCommentsCount
+            }
+        });
+
+        // Delete related notifications
+        await Notification.deleteMany({
+            $or: [
+                { comment: _id },
+                { replied_on_comment: _id }
+            ]
+        });
+
+        return res.status(200).json({ message: "Comment deleted successfully" });
+    } catch (error) {
+        console.error("Delete comment error:", error);
+        return res.status(500).json({ error: error.message || "Failed to delete comment" });
+    }
+});
+
+// Follow/Unfollow Routes
+
+// Follow/Unfollow user (requires authentication)
+server.post("/follow-user", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { user_id, isFollowing } = req.body;
+
+        console.log("Follow request:", { user_id, isFollowing, followerId: userId });
+
+        if (!user_id) {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        if (user_id === userId) {
+            return res.status(400).json({ error: "Cannot follow yourself" });
+        }
+
+        // Check if target user exists
+        const targetUser = await User.findById(user_id);
+        if (!targetUser) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        if (!isFollowing) {
+            // Follow user
+            await User.findByIdAndUpdate(userId, {
+                $addToSet: { following: user_id }
+            });
+            
+            await User.findByIdAndUpdate(user_id, {
+                $addToSet: { followers: userId }
+            });
+
+            // Create follow notification
+            const notification = new Notification({
+                type: "follow",
+                notification_for: user_id,
+                user: userId
+            });
+            await notification.save();
+
+            return res.status(200).json({ 
+                following: true,
+                message: "User followed successfully"
+            });
+        } else {
+            // Unfollow user
+            await User.findByIdAndUpdate(userId, {
+                $pull: { following: user_id }
+            });
+            
+            await User.findByIdAndUpdate(user_id, {
+                $pull: { followers: userId }
+            });
+
+            // Remove follow notification
+            await Notification.findOneAndDelete({
+                type: "follow",
+                notification_for: user_id,
+                user: userId
+            });
+
+            return res.status(200).json({ 
+                following: false,
+                message: "User unfollowed successfully"
+            });
+        }
+    } catch (error) {
+        console.error("Follow user error:", error);
+        return res.status(500).json({ error: error.message || "Failed to follow/unfollow user" });
+    }
+});
+
+// Check if user is following another user (requires authentication)
+server.post("/is-following", async (req, res) => {
+    try {
+        // Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const { user_id } = req.body;
+
+        if (!user_id) {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        // Check if current user is following the target user
+        const currentUser = await User.findById(userId);
+        const isFollowing = currentUser.following.includes(user_id);
+
+        console.log("Follow status check:", { userId, user_id, isFollowing, followingArray: currentUser.following });
+
+        return res.status(200).json({ result: isFollowing });
+    } catch (error) {
+        console.error("Check following status error:", error);
+        return res.status(500).json({ error: error.message || "Failed to check following status" });
+    }
+});
+
+// Get user followers count
+server.post("/get-followers-count", async (req, res) => {
+    try {
+        const { user_id } = req.body;
+
+        if (!user_id) {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+
+        const user = await User.findById(user_id);
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        return res.status(200).json({ 
+            followers_count: user.followers.length,
+            following_count: user.following.length
+        });
+    } catch (error) {
+        console.error("Get followers count error:", error);
+        return res.status(500).json({ error: error.message || "Failed to get followers count" });
+    }
+});
+
 // Health check endpoint
 server.get('/health', (req, res) => {
     res.status(200).json({ 
@@ -819,7 +1313,16 @@ server.get('/', (req, res) => {
             'POST /change-password',
             'POST /user-written-blogs',
             'POST /user-written-blogs-count',
-            'POST /delete-blog'
+            'POST /delete-blog',
+            'POST /like-blog',
+            'POST /isliked-by-user',
+            'POST /add-comment',
+            'POST /get-blog-comments',
+            'POST /get-replies',
+            'POST /delete-comment',
+            'POST /follow-user',
+            'POST /is-following',
+            'POST /get-followers-count'
         ]
     });
 });

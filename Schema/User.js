@@ -81,6 +81,16 @@ const userSchema = mongoose.Schema({
         type: [ Schema.Types.ObjectId ],
         ref: 'blogs',
         default: [],
+    },
+    followers: {
+        type: [ Schema.Types.ObjectId ],
+        ref: 'users',
+        default: [],
+    },
+    following: {
+        type: [ Schema.Types.ObjectId ],
+        ref: 'users',
+        default: [],
     }
 
 }, 
