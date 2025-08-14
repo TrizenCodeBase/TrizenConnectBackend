@@ -9,27 +9,58 @@ import jwt from 'jsonwebtoken';
 import cors from 'cors';
 import admin from "firebase-admin"
 import {getAuth} from "firebase-admin/auth"
-// Firebase admin configuration from environment variables
-const serviceAccountKey = {
-  type: "service_account",
-  project_id: process.env.FIREBASE_PROJECT_ID,
-  private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  client_email: process.env.FIREBASE_CLIENT_EMAIL,
-  client_id: process.env.FIREBASE_CLIENT_ID,
-  auth_uri: "https://accounts.google.com/o/oauth2/auth",
-  token_uri: "https://oauth2.googleapis.com/token",
-  auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs"
-};
+import fs from 'fs';
+
+// Firebase admin configuration - fallback to service account file if env vars not available
+let serviceAccountKey;
+
+if (process.env.FIREBASE_PROJECT_ID) {
+  // Use environment variables (preferred for production)
+  serviceAccountKey = {
+    type: "service_account",
+    project_id: process.env.FIREBASE_PROJECT_ID,
+    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+    private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    client_email: process.env.FIREBASE_CLIENT_EMAIL,
+    client_id: process.env.FIREBASE_CLIENT_ID,
+    auth_uri: "https://accounts.google.com/o/oauth2/auth",
+    token_uri: "https://oauth2.googleapis.com/token",
+    auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs"
+  };
+  console.log("Using environment variables for Firebase configuration");
+} else {
+  // Fallback to service account file (for local development)
+  try {
+    const serviceAccountData = fs.readFileSync('./service-account.json', 'utf8');
+    serviceAccountKey = JSON.parse(serviceAccountData);
+    console.log("Using service account file for Firebase configuration");
+  } catch (error) {
+    console.error("No Firebase configuration found. Please set environment variables or provide service-account.json");
+    console.error("Error:", error.message);
+    process.exit(1);
+  }
+}
 import aws from "aws-sdk";
 
 
 const server = express();
 let PORT = 3000;
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccountKey)
-})
+// Initialize Firebase Admin with error handling
+try {
+  if (serviceAccountKey && serviceAccountKey.project_id) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccountKey)
+    });
+    console.log("Firebase Admin initialized successfully");
+  } else {
+    console.error("Firebase service account key is invalid or missing");
+    // Don't exit - let the server run for health checks
+  }
+} catch (error) {
+  console.error("Failed to initialize Firebase Admin:", error.message);
+  // Don't exit - let the server run for health checks
+}
 
 let emailRegex = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/; // regex for email
 let passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{6,20}$/; // regex for password
@@ -38,10 +69,14 @@ server.use(express.json());
 server.use(cors({
   origin: [
     "http://localhost:5173",
+    "http://localhost:3000",
     "https://connectfrontend.llp.trizenventures.com",
-    "https://connect.trizenventures.com"
+    "https://connect.trizenventures.com",
+    "https://localhost:5173"
   ],
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }))
 // mongoose.connect("mongodb://127.0.0.1:27017/mydatabase", {
 //     autoIndex: true // Ensures indexing
@@ -203,6 +238,11 @@ server.post("/google-auth", async (req, res) => {
 
         if (!access_token) {
             return res.status(400).json({"error": "Access token is required"});
+        }
+
+        // Check if Firebase is properly initialized
+        if (!serviceAccountKey?.project_id) {
+            return res.status(500).json({"error": "Firebase authentication is not configured on the server"});
         }
 
         // Try to verify the token with current Firebase setup
@@ -411,6 +451,39 @@ server.get("/blog/:id", async (req, res) => {
     }
 });
 
+// Health check endpoint
+server.get('/health', (req, res) => {
+    res.status(200).json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        firebase_configured: !!serviceAccountKey?.project_id,
+        firebase_project: serviceAccountKey?.project_id || 'Not configured',
+        environment: process.env.NODE_ENV || 'development',
+        cors_origins: [
+            "http://localhost:5173",
+            "http://localhost:3000", 
+            "https://connectfrontend.llp.trizenventures.com",
+            "https://connect.trizenventures.com"
+        ]
+    });
+});
+
+// Root endpoint
+server.get('/', (req, res) => {
+    res.status(200).json({ 
+        message: 'Connect Backend API is running',
+        endpoints: [
+            'GET /health',
+            'POST /latest-blogs',
+            'GET /trending-blogs',
+            'POST /google-auth',
+            'POST /signin',
+            'POST /signup'
+        ]
+    });
+});
+
 server.listen(PORT,() => {
     console.log('Listening on port -> '+ PORT);
+    console.log('Firebase configured:', !!serviceAccountKey?.project_id);
 })
