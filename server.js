@@ -9,7 +9,18 @@ import jwt from 'jsonwebtoken';
 import cors from 'cors';
 import admin from "firebase-admin"
 import {getAuth} from "firebase-admin/auth"
-import serviceAccountKey from "./react-js-blog-website-yt-ded86-firebase-adminsdk-lmrz6-e9d71ed613.json"  with {type : 'json'};
+// Firebase admin configuration from environment variables
+const serviceAccountKey = {
+  type: "service_account",
+  project_id: process.env.FIREBASE_PROJECT_ID,
+  private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+  private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  client_email: process.env.FIREBASE_CLIENT_EMAIL,
+  client_id: process.env.FIREBASE_CLIENT_ID,
+  auth_uri: "https://accounts.google.com/o/oauth2/auth",
+  token_uri: "https://oauth2.googleapis.com/token",
+  auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs"
+};
 import aws from "aws-sdk";
 
 
@@ -184,52 +195,74 @@ server.post("/signin", (req,res) => {
     })
 })
 
-server.post("/google-auth", async (req,res) => {
-    let { access_token } = req.body;
+server.post("/google-auth", async (req, res) => {
+    try {
+        let { access_token } = req.body;
 
-    getAuth()
-    .verifyIdToken(access_token)
-    .then(async (decodedUser) => {
+        console.log("Google auth request received with token:", access_token);
 
-        let {email, name, picture} = decodedUser;
-
-        picture = picture.replace("s96-c", "s384-c");
-
-        let user = await User.findOne({"personal_info.email": email}).select("personal_info.fullname profile_info.username personal_info.profile_img google_auth").then((u) => {
-            return u || null
-        })
-        .catch(err => {
-            return res.status(500).json({"error":err.message})
-        })
-
-        if(user){ //login
-            if(user.google_auth){
-                return res.status(403).json({"error":"This email was signed up without google. Please log in with password to access the account "})
-            }
+        if (!access_token) {
+            return res.status(400).json({"error": "Access token is required"});
         }
-        else{//sign up
+
+        // Try to verify the token with current Firebase setup
+        const decodedUser = await getAuth().verifyIdToken(access_token);
+        console.log("Token verified successfully for user:", decodedUser.email);
+
+        let { email, name, picture } = decodedUser;
+
+        // Enhance picture quality
+        if (picture) {
+            picture = picture.replace("s96-c", "s384-c");
+        }
+
+        // Find existing user
+        let user = await User.findOne({"personal_info.email": email})
+            .select("personal_info.fullname personal_info.username personal_info.profile_img google_auth");
+
+        if (user) {
+            // User exists - check if it's a Google account
+            if (!user.google_auth) {
+                return res.status(403).json({
+                    "error": "This email was signed up without Google. Please log in with password to access the account"
+                });
+            }
+            console.log("Existing Google user found:", user.personal_info.username);
+        } else {
+            // Create new user
+            console.log("Creating new user for email:", email);
             let username = await generateUsername(email);
 
             user = new User({
-                personal_info: { fullname: name, email, profile_img: picture, username},
-                google_auth : true
-            })
+                personal_info: { 
+                    fullname: name, 
+                    email, 
+                    profile_img: picture, 
+                    username 
+                },
+                google_auth: true
+            });
 
-            await user.save().then((u) => {
-                user = u;
-            })
-            .catch(err => {
-                return res.status(500).json({"error":err.message})
-            })
+            await user.save();
+            console.log("New user created successfully:", username);
         }
 
-        return res.status(200).json(formatDatatoSend(user))
+        return res.status(200).json(formatDatatoSend(user));
 
-    })
-    .catch(err => {
-        return res.status(500).json({"error":"Failed to authenticate you with google. Try with some other google account"})
-    })
-
+    } catch (err) {
+        console.error("Google auth error:", err);
+        
+        if (err.code === 'auth/argument-error' || err.code === 'auth/invalid-argument') {
+            return res.status(400).json({"error": "Invalid access token provided"});
+        } else if (err.code === 'auth/id-token-expired') {
+            return res.status(401).json({"error": "Access token has expired"});
+        } else {
+            return res.status(500).json({
+                "error": "Failed to authenticate with Google. Please try again.",
+                "details": err.message
+            });
+        }
+    }
 })
 
 // Blog-related routes
