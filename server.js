@@ -301,13 +301,27 @@ server.post("/google-auth", async (req, res) => {
             .select("personal_info.fullname personal_info.username personal_info.profile_img google_auth");
 
         if (user) {
-            // User exists - check if it's a Google account
+            // User exists - enable account linking
             if (!user.google_auth) {
-                return res.status(403).json({
-                    "error": "This email was signed up without Google. Please log in with password to access the account"
-                });
+                console.log("Linking Google account to existing email/password account:", user.personal_info.username);
+                
+                // Update user to enable Google authentication and update profile picture
+                await User.findOneAndUpdate(
+                    {"personal_info.email": email},
+                    {
+                        "google_auth": true,
+                        "personal_info.profile_img": picture || user.personal_info.profile_img
+                    }
+                );
+                
+                // Fetch updated user data
+                user = await User.findOne({"personal_info.email": email})
+                    .select("personal_info.fullname personal_info.username personal_info.profile_img google_auth");
+                
+                console.log("Account successfully linked! User can now sign in with both methods.");
+            } else {
+                console.log("Existing Google user found:", user.personal_info.username);
             }
-            console.log("Existing Google user found:", user.personal_info.username);
         } else {
             // Create new user
             console.log("Creating new user for email:", email);
