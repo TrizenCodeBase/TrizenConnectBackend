@@ -328,11 +328,11 @@ server.post("/google-auth", async (req, res) => {
             let username = await generateUsername(email);
 
             user = new User({
-                personal_info: { 
-                    fullname: name, 
-                    email, 
-                    profile_img: picture, 
-                    username 
+                personal_info: {
+                    fullname: name,
+                    email,
+                    profile_img: picture,
+                    username
                 },
                 google_auth: true
             });
@@ -345,7 +345,7 @@ server.post("/google-auth", async (req, res) => {
 
     } catch (err) {
         console.error("Google auth error:", err);
-        
+
         if (err.code === 'auth/argument-error' || err.code === 'auth/invalid-argument') {
             return res.status(400).json({"error": "Invalid access token provided"});
         } else if (err.code === 'auth/id-token-expired') {
@@ -394,9 +394,20 @@ server.get("/trending-blogs", (req, res) => {
 });
 
 server.post("/search-blogs", (req, res) => {
-    let { tag, page } = req.body;
+    let { tag, author, page } = req.body;
     
-    let findQuery = { tags: tag, draft: false };
+    let findQuery = { draft: false };
+    
+    // Add tag filter if provided
+    if (tag) {
+        findQuery.tags = tag;
+    }
+    
+    // Add author filter if provided
+    if (author) {
+        findQuery.author = author;
+    }
+    
     let maxLimit = 5;
     
     Blog.find(findQuery)
@@ -424,9 +435,19 @@ server.post("/count-blogs", (req, res) => {
 });
 
 server.post("/search-count-blogs", (req, res) => {
-    let { tag } = req.body;
+    let { tag, author } = req.body;
     
-    let findQuery = { tags: tag, draft: false };
+    let findQuery = { draft: false };
+    
+    // Add tag filter if provided
+    if (tag) {
+        findQuery.tags = tag;
+    }
+    
+    // Add author filter if provided
+    if (author) {
+        findQuery.author = author;
+    }
     
     Blog.countDocuments(findQuery)
     .then(count => {
@@ -487,6 +508,74 @@ server.post("/create-blog", async (req, res) => {
     } catch (error) {
         console.error("/create-blog error:", error);
         return res.status(500).json({ error: error.message || "Failed to create blog" });
+    }
+});
+
+
+
+// Update Blog Route
+server.post("/update-blog", async (req, res) => {
+    try {
+        // 1. Authenticate user
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "No token provided" });
+        }
+        const token = authHeader.split(" ")[1];
+        let userId;
+        try {
+            const decoded = jwt.verify(token, process.env.SECRET_ACCESS_KEY);
+            userId = decoded.id;
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        // 2. Validate input
+        const { id, title, banner, content, tags, des, draft } = req.body;
+        if (!id) {
+            return res.status(400).json({ error: "Blog ID is required for update" });
+        }
+        if (!title || !banner || !content || !Array.isArray(tags) || tags.length === 0 || !des) {
+            return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        // 3. Find the existing blog and verify ownership
+        const existingBlog = await Blog.findOne({ blog_id: id });
+        if (!existingBlog) {
+            return res.status(404).json({ error: "Blog not found" });
+        }
+
+        // Check if the user is the author
+        if (existingBlog.author.toString() !== userId) {
+            return res.status(403).json({ error: "You don't have permission to edit this blog" });
+        }
+
+        // 4. Update the blog
+        const updatedBlog = await Blog.findOneAndUpdate(
+            { blog_id: id },
+            {
+                title,
+                banner,
+                content,
+                tags,
+                des,
+                draft: draft !== undefined ? draft : existingBlog.draft
+            },
+            { new: true }
+        ).populate("author", "personal_info.profile_img personal_info.username personal_info.fullname");
+
+        if (!updatedBlog) {
+            return res.status(500).json({ error: "Failed to update blog" });
+        }
+
+        // 5. Return the updated blog
+        return res.status(200).json({ 
+            message: "Blog updated successfully", 
+            blog: updatedBlog 
+        });
+    } catch (error) {
+        console.error("/update-blog error:", error);
+        return res.status(500).json({ error: error.message || "Failed to update blog" });
     }
 });
 
